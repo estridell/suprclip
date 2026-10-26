@@ -53,7 +53,9 @@ pub fn read_list(path: &Path) -> Vec<Segment> {
 }
 
 pub fn buffered_seconds(paths: &Paths) -> f64 {
-    read_list(&paths.list).iter().map(Segment::duration).sum()
+    read_list(&paths.list)
+        .iter()
+        .fold(0.0, |acc, s| acc + s.duration())
 }
 
 /// Newest segments covering at least `seconds`, oldest first.

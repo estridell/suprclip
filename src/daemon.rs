@@ -6,11 +6,12 @@ use crate::ipc::{self, Request, Response, Status};
 use crate::recorder::{self, Paths, Pipeline};
 use crate::sound;
 use anyhow::{Context, Result, bail};
+use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -20,18 +21,23 @@ struct Daemon {
     paths: Paths,
     stopping: AtomicBool,
     pids: Mutex<Vec<u32>>,
+    /// Held while anything reads or wipes the segment buffer.
+    buffer: Mutex<()>,
+    _lock: File,
 }
 
 pub fn run(cfg: Config) -> Result<()> {
     let paths = Paths::new();
-    if UnixStream::connect(&paths.socket).is_ok() {
+    std::fs::create_dir_all(&paths.dir)
+        .with_context(|| format!("creating {}", paths.dir.display()))?;
+    std::fs::set_permissions(&paths.dir, std::fs::Permissions::from_mode(0o700))?;
+    // Held until we exit, so two `start`s can't both take over the socket.
+    let lock = File::create(&paths.lock)?;
+    if lock.try_lock().is_err() {
         bail!("already recording (stop it with `suprclip stop`)");
     }
     let monitor = recorder::resolve_monitor(&cfg.monitor)?;
 
-    std::fs::create_dir_all(&paths.dir)
-        .with_context(|| format!("creating {}", paths.dir.display()))?;
-    std::fs::set_permissions(&paths.dir, std::fs::Permissions::from_mode(0o700))?;
     let _ = std::fs::remove_file(&paths.socket);
     let listener = UnixListener::bind(&paths.socket).context("binding control socket")?;
     if cfg.sound.enabled && cfg.sound.file.is_none() {
@@ -45,6 +51,8 @@ pub fn run(cfg: Config) -> Result<()> {
         paths,
         stopping: AtomicBool::new(false),
         pids: Mutex::new(Vec::new()),
+        buffer: Mutex::new(()),
+        _lock: lock,
     }));
     ctrlc::set_handler(move || d.shutdown(0)).context("installing signal handler")?;
 
@@ -78,7 +86,10 @@ impl Daemon {
         let mut backoff = Duration::from_secs(1);
         let mut first = true;
         loop {
-            reset_dir(&self.paths.buffer);
+            {
+                let _buffer = self.lock_buffer();
+                reset_dir(&self.paths.buffer);
+            }
             let started = Instant::now();
             match Pipeline::spawn(&self.cfg, &self.monitor, &self.paths) {
                 Ok(pipeline) => {
@@ -130,7 +141,11 @@ impl Daemon {
     fn clip(&self, seconds: Option<u32>, output: Option<PathBuf>) -> Response {
         let cfg = &self.cfg;
         let seconds = seconds.unwrap_or(cfg.clip_seconds);
-        match clip::save(cfg, &self.paths, seconds, output) {
+        let saved = {
+            let _buffer = self.lock_buffer();
+            clip::save(cfg, &self.paths, seconds, output)
+        };
+        match saved {
             Ok(saved) => {
                 eprintln!(
                     "suprclip: saved {:.0}s to {}",
@@ -176,8 +191,14 @@ impl Daemon {
         }
     }
 
+    fn lock_buffer(&self) -> MutexGuard<'_, ()> {
+        self.buffer.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn shutdown(&self, code: i32) -> ! {
         self.stopping.store(true, Ordering::SeqCst);
+        // Let a clip that's being saved finish first.
+        let _buffer = self.lock_buffer();
         for &pid in self.pids.lock().unwrap().iter() {
             unsafe { libc::kill(pid as i32, libc::SIGTERM) };
         }

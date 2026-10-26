@@ -19,6 +19,7 @@ pub struct Paths {
     pub buffer: PathBuf,
     pub list: PathBuf,
     pub socket: PathBuf,
+    pub lock: PathBuf,
     pub wf_log: PathBuf,
     pub ffmpeg_log: PathBuf,
     pub ding: PathBuf,
@@ -34,6 +35,7 @@ impl Paths {
         Self {
             list: buffer.join("segments.csv"),
             socket: dir.join("ctl.sock"),
+            lock: dir.join("lock"),
             wf_log: dir.join("wf-recorder.log"),
             ffmpeg_log: dir.join("ffmpeg.log"),
             ding: dir.join("ding.wav"),
@@ -117,7 +119,9 @@ fn log_file(path: &Path) -> Result<File> {
 
 pub fn recorder_args(cfg: &Config, monitor: &str) -> Vec<String> {
     let v = &cfg.video;
-    let mut args: Vec<String> = vec!["-y".into(), "-o".into(), monitor.into()];
+    // -D: capture every frame, not just on damage. Otherwise a still screen stalls the stream
+    // (and the audio with it) until something moves.
+    let mut args: Vec<String> = vec!["-y".into(), "-D".into(), "-o".into(), monitor.into()];
     args.extend([
         "-c".into(),
         v.codec.clone(),
