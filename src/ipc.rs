@@ -9,10 +9,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
-    Clip {
-        seconds: Option<u32>,
-        output: Option<PathBuf>,
-    },
+    Clip { output: Option<PathBuf> },
     Status,
     Stop,
 }
@@ -34,8 +31,7 @@ pub struct Status {
     pub fps: u32,
     pub audio: bool,
     pub buffered_seconds: f64,
-    pub buffer_seconds: u32,
-    pub clip_seconds: u32,
+    pub seconds: u32,
     pub output_dir: PathBuf,
     pub runtime_dir: PathBuf,
 }

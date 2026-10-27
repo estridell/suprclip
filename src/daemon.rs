@@ -37,6 +37,7 @@ pub fn run(cfg: Config) -> Result<()> {
         bail!("already recording (stop it with `suprclip stop`)");
     }
     let monitor = recorder::resolve_monitor(&cfg.monitor)?;
+    warn_if_window_too_big(&cfg, &paths.dir);
 
     let _ = std::fs::remove_file(&paths.socket);
     let listener = UnixListener::bind(&paths.socket).context("binding control socket")?;
@@ -64,12 +65,9 @@ pub fn run(cfg: Config) -> Result<()> {
         c.video.codec,
         c.video.quality,
         if c.audio.enabled { ", with audio" } else { "" },
-        c.buffer_seconds(),
+        c.seconds,
     );
-    eprintln!(
-        "suprclip: run `suprclip` to save the last {}s",
-        c.clip_seconds
-    );
+    eprintln!("suprclip: run `suprclip` to save them");
 
     std::thread::spawn(move || d.supervise());
     for stream in listener.incoming() {
@@ -125,7 +123,7 @@ impl Daemon {
     fn handle(&self, stream: UnixStream) {
         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let response = match ipc::read_line::<Request>(&stream) {
-            Ok(Request::Clip { seconds, output }) => self.clip(seconds, output),
+            Ok(Request::Clip { output }) => self.clip(output),
             Ok(Request::Status) => Response::Status(self.status()),
             Ok(Request::Stop) => {
                 let _ = ipc::write_line(&stream, &Response::Stopping);
@@ -138,12 +136,11 @@ impl Daemon {
         let _ = ipc::write_line(&stream, &response);
     }
 
-    fn clip(&self, seconds: Option<u32>, output: Option<PathBuf>) -> Response {
+    fn clip(&self, output: Option<PathBuf>) -> Response {
         let cfg = &self.cfg;
-        let seconds = seconds.unwrap_or(cfg.clip_seconds);
         let saved = {
             let _buffer = self.lock_buffer();
-            clip::save(cfg, &self.paths, seconds, output)
+            clip::save(cfg, &self.paths, output)
         };
         match saved {
             Ok(saved) => {
@@ -183,9 +180,8 @@ impl Daemon {
             codec: cfg.video.codec.clone(),
             fps: cfg.fps,
             audio: cfg.audio.enabled,
-            buffered_seconds: clip::buffered_seconds(&self.paths),
-            buffer_seconds: cfg.buffer_seconds(),
-            clip_seconds: cfg.clip_seconds,
+            buffered_seconds: clip::buffered_seconds(&self.paths).min(cfg.seconds as f64),
+            seconds: cfg.seconds,
             output_dir: cfg.output_dir(),
             runtime_dir: self.paths.dir.clone(),
         }
@@ -210,6 +206,33 @@ impl Daemon {
         }
         std::process::exit(code);
     }
+}
+
+/// Rough upper bound for a busy 1080p60 game at the default quality.
+const EST_BYTES_PER_SECOND: u64 = 3_000_000;
+
+/// The buffer lives on tmpfs (RAM), so warn before a huge window fills it.
+fn warn_if_window_too_big(cfg: &Config, dir: &Path) {
+    let need = cfg.seconds as u64 * EST_BYTES_PER_SECOND;
+    let Some(free) = free_bytes(dir) else { return };
+    if need > free {
+        eprintln!(
+            "suprclip: warning: a {}s window can take ~{:.1} GB of RAM, but {} only has {:.1} GB free",
+            cfg.seconds,
+            need as f64 / 1e9,
+            dir.display(),
+            free as f64 / 1e9,
+        );
+    }
+}
+
+fn free_bytes(dir: &Path) -> Option<u64> {
+    let path = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some(st.f_bavail as u64 * st.f_frsize as u64)
 }
 
 fn reset_dir(dir: &Path) {

@@ -78,7 +78,7 @@ pub struct Saved {
     pub seconds: f64,
 }
 
-pub fn save(cfg: &Config, paths: &Paths, seconds: u32, output: Option<PathBuf>) -> Result<Saved> {
+pub fn save(cfg: &Config, paths: &Paths, output: Option<PathBuf>) -> Result<Saved> {
     // Wait for the segment in progress to land so the clip ends at the moment you asked.
     let last_end = read_list(&paths.list).last().map(|s| s.end);
     let deadline = Instant::now() + Duration::from_millis(2500);
@@ -89,7 +89,7 @@ pub fn save(cfg: &Config, paths: &Paths, seconds: u32, output: Option<PathBuf>) 
         sleep(Duration::from_millis(50));
     }
 
-    let segments: Vec<_> = select(&read_list(&paths.list), seconds as f64)
+    let segments: Vec<_> = select(&read_list(&paths.list), cfg.seconds as f64)
         .into_iter()
         .filter(|s| paths.buffer.join(&s.file).exists())
         .collect();
