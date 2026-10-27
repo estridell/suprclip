@@ -15,7 +15,8 @@ use std::process::ExitCode;
 
 /// Lightweight replay-buffer screen clipper for Hyprland.
 ///
-/// Run `suprclip start` once, then `suprclip` (bind it to a key) saves the last 30 seconds.
+/// Run `suprclip start` once, then `suprclip` (bind it to a key) saves the last 30 seconds
+/// (set with `seconds` in the config or `suprclip start -d N`).
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -31,11 +32,8 @@ struct Cli {
 enum Cmd {
     /// Start recording into the replay buffer (runs in the foreground)
     Start(StartArgs),
-    /// Save the last N seconds (what plain `suprclip` does)
+    /// Save the rolling window (what plain `suprclip` does)
     Clip {
-        /// Seconds to save [default: clip_seconds from the config]
-        #[arg(short = 'd', long)]
-        seconds: Option<u32>,
         /// Output file [default: <output_dir>/suprclip_<time>.mp4]
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -69,12 +67,9 @@ struct StartArgs {
     /// Constant-quality level (lower = better)
     #[arg(short, long)]
     quality: Option<u32>,
-    /// Default clip length in seconds
+    /// Rolling window in seconds: how much each clip saves
     #[arg(short = 'd', long)]
     seconds: Option<u32>,
-    /// Seconds of history to keep
-    #[arg(long)]
-    buffer: Option<u32>,
     /// Don't record audio
     #[arg(long)]
     no_audio: bool,
@@ -98,18 +93,15 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     let config_path = cli.config.unwrap_or_else(config::default_path);
     let paths = Paths::new();
-    match cli.command.unwrap_or(Cmd::Clip {
-        seconds: None,
-        output: None,
-    }) {
+    match cli.command.unwrap_or(Cmd::Clip { output: None }) {
         Cmd::Start(args) => {
             let mut cfg = Config::load(&config_path)?;
             args.apply(&mut cfg);
             daemon::run(cfg)
         }
-        Cmd::Clip { seconds, output } => {
+        Cmd::Clip { output } => {
             let output = output.map(std::path::absolute).transpose()?;
-            match ipc::send(&paths.socket, &Request::Clip { seconds, output })? {
+            match ipc::send(&paths.socket, &Request::Clip { output })? {
                 Response::Saved { path, seconds } => {
                     println!("saved {seconds:.0}s to {}", path.display());
                     Ok(())
@@ -121,11 +113,7 @@ fn run(cli: Cli) -> Result<()> {
             Response::Status(s) => {
                 println!("recording   {} @ {} fps, {}", s.monitor, s.fps, s.codec);
                 println!("audio       {}", if s.audio { "on" } else { "off" });
-                println!(
-                    "buffered    {:.0}s of {}s",
-                    s.buffered_seconds, s.buffer_seconds
-                );
-                println!("clip length {}s", s.clip_seconds);
+                println!("buffered    {:.0}s of {}s", s.buffered_seconds, s.seconds);
                 println!("saving to   {}", s.output_dir.display());
                 println!("logs        {}", s.runtime_dir.display());
                 println!("pid         {}", s.pid);
@@ -182,10 +170,7 @@ impl StartArgs {
             cfg.video.quality = q;
         }
         if let Some(s) = self.seconds {
-            cfg.clip_seconds = s;
-        }
-        if let Some(b) = self.buffer {
-            cfg.buffer_seconds = b;
+            cfg.seconds = s;
         }
         if self.no_audio {
             cfg.audio.enabled = false;

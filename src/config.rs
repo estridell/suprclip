@@ -6,16 +6,16 @@ use std::path::{Path, PathBuf};
 /// The template written by `suprclip config --init`. Kept in sync with `Default` by a test.
 pub const DEFAULT_CONFIG: &str = r#"# suprclip config
 
-# Seconds saved when you run `suprclip` / `suprclip clip`.
-clip_seconds = 30
-# Seconds of history kept in RAM. Raised to clip_seconds if lower.
-buffer_seconds = 60
+# The rolling window: the last `seconds` are kept in RAM and `suprclip` saves all of it.
+# RAM use is roughly seconds x bitrate: about 1-3 MB per second at 1080p60, quality 23.
+seconds = 30
 # Where clips are written. `~` is expanded.
 output_dir = "~/Videos/suprclip"
 # Container for saved clips: "mp4" or "mkv".
 container = "mp4"
-# Hyprland monitor to record (see `hyprctl monitors`), or "auto" for the
-# monitor that is focused when recording starts.
+# Monitor to record: "auto" (the one focused when recording starts), a connector name
+# like "DP-1", or part of its description from `hyprctl monitors`, like "VG279QM".
+# The description is stable even when connector names change between boots.
 monitor = "auto"
 fps = 60
 # Desktop notification (notify-send) when a clip is saved.
@@ -54,8 +54,7 @@ volume = 0.6
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub clip_seconds: u32,
-    pub buffer_seconds: u32,
+    pub seconds: u32,
     pub output_dir: String,
     pub container: String,
     pub monitor: String,
@@ -96,8 +95,7 @@ pub struct Sound {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            clip_seconds: 30,
-            buffer_seconds: 60,
+            seconds: 30,
             output_dir: "~/Videos/suprclip".into(),
             container: "mp4".into(),
             monitor: "auto".into(),
@@ -156,8 +154,8 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.clip_seconds == 0 {
-            bail!("clip_seconds must be > 0");
+        if self.seconds == 0 {
+            bail!("seconds must be > 0");
         }
         if self.fps == 0 {
             bail!("fps must be > 0");
@@ -166,10 +164,6 @@ impl Config {
             bail!("container must be \"mp4\" or \"mkv\"");
         }
         Ok(())
-    }
-
-    pub fn buffer_seconds(&self) -> u32 {
-        self.buffer_seconds.max(self.clip_seconds)
     }
 
     pub fn output_dir(&self) -> PathBuf {
@@ -212,25 +206,15 @@ mod tests {
 
     #[test]
     fn partial_config_fills_defaults() {
-        let cfg: Config = toml::from_str("clip_seconds = 15\n[video]\nquality = 18\n").unwrap();
-        assert_eq!(cfg.clip_seconds, 15);
+        let cfg: Config = toml::from_str("seconds = 15\n[video]\nquality = 18\n").unwrap();
+        assert_eq!(cfg.seconds, 15);
         assert_eq!(cfg.video.quality, 18);
         assert_eq!(cfg.video.codec, "h264_nvenc");
         assert!(cfg.audio.enabled);
     }
 
     #[test]
-    fn buffer_never_shorter_than_clip() {
-        let cfg = Config {
-            clip_seconds: 90,
-            buffer_seconds: 60,
-            ..Config::default()
-        };
-        assert_eq!(cfg.buffer_seconds(), 90);
-    }
-
-    #[test]
     fn rejects_unknown_keys() {
-        assert!(toml::from_str::<Config>("clip_secs = 10").is_err());
+        assert!(toml::from_str::<Config>("clip_seconds = 10").is_err());
     }
 }

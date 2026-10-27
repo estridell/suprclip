@@ -12,7 +12,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 /// Segment length in seconds. Keyframes are placed every second so cuts land exactly.
 pub const SEGMENT_SECONDS: u32 = 1;
 /// Extra segments kept on disk beyond the list, so files being clipped aren't overwritten.
-const WRAP_MARGIN: u32 = 15;
+const WRAP_MARGIN: u32 = 5;
 
 pub struct Paths {
     pub dir: PathBuf,
@@ -187,7 +187,7 @@ fn codec_params(cfg: &Config) -> BTreeMap<String, String> {
 }
 
 fn segmenter_args(cfg: &Config) -> Vec<String> {
-    let listed = cfg.buffer_seconds().div_ceil(SEGMENT_SECONDS) + 2;
+    let listed = cfg.seconds.div_ceil(SEGMENT_SECONDS) + 2;
     let wrap = listed + WRAP_MARGIN;
     [
         "-hide_banner",
@@ -221,30 +221,45 @@ fn segmenter_args(cfg: &Config) -> Vec<String> {
     .to_vec()
 }
 
-/// Picks the monitor to record. "auto" = the focused Hyprland monitor.
+pub struct Monitor {
+    pub name: String,
+    pub description: String,
+    pub focused: bool,
+}
+
+/// Picks the monitor to record: "auto" = the focused one; otherwise a connector name
+/// ("DP-1") or part of the description ("VG279QM"), which survives connector renames.
 pub fn resolve_monitor(wanted: &str) -> Result<String> {
-    let monitors = hypr_monitors();
-    if wanted != "auto" {
-        if let Ok(list) = &monitors
-            && !list.iter().any(|(name, _)| name == wanted)
-        {
-            let names: Vec<_> = list.iter().map(|(n, _)| n.as_str()).collect();
+    match hypr_monitors() {
+        Ok(list) => pick_monitor(&list, wanted),
+        Err(_) if wanted != "auto" => Ok(wanted.to_string()),
+        Err(e) => Err(e).context("monitor = \"auto\" needs hyprctl; set `monitor` in the config"),
+    }
+}
+
+pub fn pick_monitor(list: &[Monitor], wanted: &str) -> Result<String> {
+    let found = if wanted == "auto" {
+        list.iter().find(|m| m.focused).or(list.first())
+    } else {
+        let by_name = list.iter().find(|m| m.name == wanted);
+        by_name.or_else(|| list.iter().find(|m| m.description.contains(wanted)))
+    };
+    match found {
+        Some(m) => Ok(m.name.clone()),
+        None => {
+            let names: Vec<_> = list
+                .iter()
+                .map(|m| format!("{} ({})", m.name, m.description))
+                .collect();
             bail!(
                 "monitor {wanted:?} not found (available: {})",
                 names.join(", ")
-            );
+            )
         }
-        return Ok(wanted.to_string());
     }
-    let list = monitors.context("monitor = \"auto\" needs hyprctl; set `monitor` in the config")?;
-    list.iter()
-        .find(|(_, focused)| *focused)
-        .or(list.first())
-        .map(|(name, _)| name.clone())
-        .context("hyprctl reported no monitors")
 }
 
-fn hypr_monitors() -> Result<Vec<(String, bool)>> {
+fn hypr_monitors() -> Result<Vec<Monitor>> {
     let out = Command::new("hyprctl").args(["monitors", "-j"]).output()?;
     if !out.status.success() {
         bail!("hyprctl failed");
@@ -255,8 +270,11 @@ fn hypr_monitors() -> Result<Vec<(String, bool)>> {
         .context("unexpected hyprctl output")?
         .iter()
         .filter_map(|m| {
-            let name = m["name"].as_str()?.to_string();
-            Some((name, m["focused"].as_bool().unwrap_or(false)))
+            Some(Monitor {
+                name: m["name"].as_str()?.to_string(),
+                description: m["description"].as_str().unwrap_or_default().to_string(),
+                focused: m["focused"].as_bool().unwrap_or(false),
+            })
         })
         .collect())
 }
@@ -290,5 +308,22 @@ mod tests {
         assert!(has_pair(&args, "-p", "crf=18"));
         assert!(has_pair(&args, "-p", "preset=faster"));
         assert!(!args.iter().any(|a| a.starts_with("--audio")));
+    }
+
+    #[test]
+    fn picks_monitor_by_name_description_or_focus() {
+        let mon = |name: &str, description: &str, focused| Monitor {
+            name: name.into(),
+            description: description.into(),
+            focused,
+        };
+        let list = [
+            mon("HDMI-A-1", "ASUSTek COMPUTER INC VG245 H9LMQS138151", false),
+            mon("DP-1", "ASUSTek COMPUTER INC VG279QM L7LMQS130249", true),
+        ];
+        assert_eq!(pick_monitor(&list, "auto").unwrap(), "DP-1");
+        assert_eq!(pick_monitor(&list, "HDMI-A-1").unwrap(), "HDMI-A-1");
+        assert_eq!(pick_monitor(&list, "VG279QM").unwrap(), "DP-1");
+        assert!(pick_monitor(&list, "DP-4").is_err());
     }
 }
